@@ -220,3 +220,41 @@ async def test_delete_update_deletes_and_audits() -> None:
     assert response.detail == "Update deleted successfully"
     assert student_update.is_deleted is True
     assert any(type(obj).__name__ == "AuditLog" for obj in session.added)
+
+
+async def test_list_mentor_and_admin_announcements() -> None:
+    session = DummySession()
+    service = UpdatesService(session)  # type: ignore[arg-type]
+
+    mentor_update = build_update(id=1, created_by=10)
+    admin_update = build_update(id=2, created_by=20)
+
+    calls = []
+    async def execute_mock(statement: any, params: any = None) -> any:
+        calls.append(statement)
+        if len(calls) == 1:
+            class ResultMentor:
+                def scalars(self):
+                    class Scalars:
+                        def all(self):
+                            return [mentor_update]
+                    return Scalars()
+            return ResultMentor()
+        else:
+            class ResultAdmin:
+                def scalars(self):
+                    class Scalars:
+                        def all(self):
+                            return [admin_update]
+                    return Scalars()
+            return ResultAdmin()
+
+    session.execute = execute_mock  # type: ignore[method-assign]
+
+    mentor_res = await service.list_mentor_announcements()
+    assert len(mentor_res) == 1
+    assert mentor_res[0].id == 1
+
+    admin_res = await service.list_admin_announcements()
+    assert len(admin_res) == 1
+    assert admin_res[0].id == 2

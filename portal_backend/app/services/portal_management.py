@@ -258,6 +258,7 @@ class PortalManagementService:
         )
         self.session.add(material)
         await self.session.commit()
+        self._audit(actor=actor, action="course_material_created", resource_id=str(material.id))
         await self.session.refresh(material)
         return self._material_response(material)
 
