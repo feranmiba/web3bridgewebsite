@@ -154,6 +154,8 @@ class StudentProfile(TimestampMixin, Base):
     )
     participation: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    programme: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    track: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="profile")
 

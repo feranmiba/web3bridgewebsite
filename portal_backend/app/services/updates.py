@@ -208,7 +208,7 @@ class UpdatesService:
             # 2. Programme
             if student_update.programme:
                 if user.role == UserRole.STUDENT.value:
-                    if not profile or profile.cohort != student_update.programme:
+                    if not profile or profile.programme != student_update.programme:
                         continue
                 elif user.role == UserRole.MENTOR.value:
                     if not mentor_programme or mentor_programme != student_update.programme:
@@ -217,7 +217,7 @@ class UpdatesService:
             # 3. Track
             if student_update.track:
                 if user.role == UserRole.STUDENT.value:
-                    if student_update.track.lower().strip() not in course_names:
+                    if not profile or not profile.track or profile.track.lower().strip() != student_update.track.lower().strip():
                         continue
                 elif user.role == UserRole.MENTOR.value:
                     if not mentor_track or mentor_track.lower().strip() != student_update.track.lower().strip():
@@ -426,12 +426,19 @@ class UpdatesService:
 
     async def _list_target_emails(self, *, student_update: StudentUpdate) -> list[str]:
         if student_update.target_type == UpdateTargetType.ALL_ACTIVE.value:
-            result = await self.session.execute(
-                select(User.email).where(
+            statement = (
+                select(User.email)
+                .join(StudentProfile, StudentProfile.user_id == User.id)
+                .where(
                     User.role == UserRole.STUDENT.value,
                     User.account_state == AccountState.ACTIVE.value,
                 )
             )
+            if student_update.programme:
+                statement = statement.where(StudentProfile.programme == student_update.programme)
+            if student_update.track:
+                statement = statement.where(StudentProfile.track == student_update.track)
+            result = await self.session.execute(statement)
             return [email for email in result.scalars().all() if email]
 
         if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
@@ -453,7 +460,7 @@ class UpdatesService:
         if student_update.target_type == UpdateTargetType.COHORT.value:
             if not student_update.target_ref:
                 return []
-            result = await self.session.execute(
+            statement = (
                 select(User.email)
                 .join(StudentProfile, StudentProfile.user_id == User.id)
                 .where(
@@ -461,6 +468,11 @@ class UpdatesService:
                     StudentProfile.cohort == student_update.target_ref,
                 )
             )
+            if student_update.programme:
+                statement = statement.where(StudentProfile.programme == student_update.programme)
+            if student_update.track:
+                statement = statement.where(StudentProfile.track == student_update.track)
+            result = await self.session.execute(statement)
             return [email for email in result.scalars().all() if email]
 
         if student_update.target_type == UpdateTargetType.COURSE.value:
@@ -470,16 +482,20 @@ class UpdatesService:
                 course_id = int(student_update.target_ref)
             except ValueError:
                 return []
-            result = await self.session.execute(
-                text(
-                    """
-                    SELECT DISTINCT LOWER(TRIM(p.email)) AS email
-                    FROM cohort_participant AS p
-                    WHERE p.course_id = :course_id
-                    """
-                ),
-                {"course_id": course_id},
+            statement = (
+                select(User.email)
+                .join(StudentProfile, StudentProfile.user_id == User.id)
+                .join(text("cohort_participant"), text("LOWER(TRIM(cohort_participant.email)) = LOWER(TRIM(users.email))"))
+                .where(
+                    User.role == UserRole.STUDENT.value,
+                    text("cohort_participant.course_id = :course_id")
+                )
             )
+            if student_update.programme:
+                statement = statement.where(StudentProfile.programme == student_update.programme)
+            if student_update.track:
+                statement = statement.where(StudentProfile.track == student_update.track)
+            result = await self.session.execute(statement, {"course_id": course_id})
             return [email for email in result.scalars().all() if email]
 
         return []
