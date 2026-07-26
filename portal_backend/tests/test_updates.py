@@ -36,6 +36,38 @@ class DummySession:
     async def delete(self, obj: object) -> None:
         self.deleted.append(obj)
 
+    async def execute(self, statement: any, params: any = None) -> any:
+        # If cohort participant query
+        if "cohort_participant" in str(statement):
+            class CourseResult:
+                def all(self):
+                    return []
+                def scalars(self):
+                    class Scalars:
+                        def all(self):
+                            return []
+                    return Scalars()
+            return CourseResult()
+
+        class Result:
+            def __init__(self, session):
+                self.session = session
+            def all(self):
+                updates = getattr(self.session, "_test_updates", [])
+                if updates:
+                    return [
+                        (updates[0], None),
+                        (updates[1], datetime.now(UTC)),
+                        (updates[2], None)
+                    ]
+                return []
+            def scalars(self):
+                class Scalars:
+                    def all(self):
+                        return []
+                return Scalars()
+        return Result(self)
+
 
 def build_staff_user() -> User:
     return User(id=1, email="staff@example.com", role="staff", account_state="active")
@@ -73,6 +105,8 @@ async def test_create_update_creates_audited_published_update() -> None:
             body="Portal is live",
             target_type=UpdateTargetType.ALL_ACTIVE,
             is_published=True,
+            programme="Web3",
+            track="Smart Contracts",
         ),
     )
 
@@ -98,6 +132,7 @@ async def test_list_my_updates_filters_visible_updates() -> None:
         id=2, target_type=UpdateTargetType.INDIVIDUAL.value, target_ref=str(user.id)
     )
     hidden = build_update(id=3, target_type=UpdateTargetType.COHORT.value, target_ref="Cohort XV")
+    session._test_updates = [matching, individual, hidden]
 
     async def list_published() -> list[StudentUpdate]:
         return [matching, individual, hidden]
