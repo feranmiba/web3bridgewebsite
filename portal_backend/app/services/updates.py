@@ -84,6 +84,39 @@ class UpdatesService:
         updates = await self._list_all_updates()
         return [self._build_update_response(student_update=item) for item in updates]
 
+    async def list_mentor_announcements(self) -> list[StudentUpdateResponse]:
+        statement = (
+            select(StudentUpdate)
+            .join(User, StudentUpdate.created_by == User.id)
+            .where(
+                User.role == UserRole.MENTOR.value,
+                StudentUpdate.is_deleted.is_(False),
+            )
+            .order_by(StudentUpdate.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [self._build_update_response(student_update=item) for item in result.scalars().all()]
+
+    async def list_admin_announcements(self) -> list[StudentUpdateResponse]:
+        statement = (
+            select(StudentUpdate)
+            .join(User, StudentUpdate.created_by == User.id)
+            .where(
+                User.role.in_(
+                    [
+                        UserRole.ADMIN.value,
+                        UserRole.STAFF.value,
+                        UserRole.GENERAL_ADMIN.value,
+                        UserRole.SYSTEM_ADMIN.value,
+                    ]
+                ),
+                StudentUpdate.is_deleted.is_(False),
+            )
+            .order_by(StudentUpdate.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        return [self._build_update_response(student_update=item) for item in result.scalars().all()]
+
     async def get_update(self, *, update_id: int) -> StudentUpdateResponse:
         student_update = await self._get_update_by_id(update_id)
         return self._build_update_response(student_update=student_update)
