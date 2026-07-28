@@ -44,6 +44,8 @@ class MentorResponse(BaseModel):
 
 class MentorCourseAssignRequest(BaseModel):
     course_id: int = Field(gt=0)
+    programme: str | None = None
+    track: str | None = None
 
 
 class CourseMaterialCreateRequest(BaseModel):
@@ -180,3 +182,19 @@ class InvitePortalUserResponse(BaseModel):
     role: str
     account_state: str
     activation_url: str
+
+
+class MentorUploadResponse(BaseModel):
+    id: int
+    course_id: int
+    title: str
+    material_type: str
+    resource_url: str | None = None
+    content: str | None = None
+    metadata: dict
+    created_at: datetime
+    updated_at: datetime
+    mentor_id: int
+    mentor_name: str
+    programme: str | None = None
+    track: str | None = None

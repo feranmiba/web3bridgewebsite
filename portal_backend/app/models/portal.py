@@ -326,6 +326,8 @@ class MentorCourseMap(TimestampMixin, Base):
         ForeignKey(f"{schema_prefix}mentors.id", ondelete="CASCADE"), nullable=False, index=True
     )
     course_id: Mapped[int] = mapped_column(nullable=False, index=True)
+    programme: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    track: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class CourseMaterial(TimestampMixin, Base):
