@@ -32,8 +32,8 @@ class CreateStudentUpdateRequest(BaseModel):
     is_published: bool = False
     send_in_app: bool = True
     send_email: bool = False
-    programme: str = Field(min_length=1, max_length=255)
-    track: str = Field(min_length=1, max_length=255)
+    programme: str | None = Field(default=None, max_length=255)
+    track: str | None = Field(default=None, max_length=255)
     target_role: str | None = Field(default=None, max_length=50)
 
     @model_validator(mode="after")
