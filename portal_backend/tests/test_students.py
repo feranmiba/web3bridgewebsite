@@ -50,6 +50,8 @@ def build_student_profile() -> StudentProfile:
         cohort="Cohort XIV",
         onboarding_status=OnboardingStatus.COMPLETED.value,
         bio="Hello world",
+        programme="Web3 Solidity",
+        track="Web3",
     )
 
 
@@ -72,6 +74,8 @@ async def test_list_students_returns_student_responses() -> None:
     assert len(response) == 1
     assert response[0].user_id == user.id
     assert response[0].full_name == profile.full_name
+    assert response[0].programme == "Web3 Solidity"
+    assert response[0].track == "Web3"
 
 
 async def test_list_students_filtering_by_cohort() -> None:

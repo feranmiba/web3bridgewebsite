@@ -33,6 +33,7 @@ from app.schemas.portal_management import (
     MentorUpdateRequest,
     InvitePortalUserRequest,
     InvitePortalUserResponse,
+    MentorUploadResponse,
 )
 from app.services.auth import AuthService
 from app.services.onboarding import OnboardingService
@@ -218,7 +219,15 @@ class PortalManagementService:
         self._audit(actor=actor, action="mentor_deleted", resource_id=str(mentor_id))
         await self.session.commit()
 
-    async def assign_mentor_course(self, *, actor: User, mentor_id: int, course_id: int) -> MentorResponse:
+    async def assign_mentor_course(
+        self,
+        *,
+        actor: User,
+        mentor_id: int,
+        course_id: int,
+        programme: str | None = None,
+        track: str | None = None,
+    ) -> MentorResponse:
         await self._get_mentor(mentor_id)
         result = await self.session.execute(
             select(MentorCourseMap).where(
@@ -227,7 +236,17 @@ class PortalManagementService:
         )
         row = result.scalar_one_or_none()
         if row is None:
-            self.session.add(MentorCourseMap(mentor_id=mentor_id, course_id=course_id))
+            self.session.add(
+                MentorCourseMap(
+                    mentor_id=mentor_id,
+                    course_id=course_id,
+                    programme=programme,
+                    track=track,
+                )
+            )
+        else:
+            row.programme = programme
+            row.track = track
         self._audit(actor=actor, action="mentor_course_assigned", resource_id=f"{mentor_id}:{course_id}")
         await self.session.commit()
         mentor = await self._get_mentor(mentor_id)
@@ -268,6 +287,35 @@ class PortalManagementService:
             statement = statement.where(CourseMaterial.course_id == course_id)
         result = await self.session.execute(statement)
         return [self._material_response(item) for item in result.scalars().all()]
+
+    async def list_mentor_uploads(self) -> list[MentorUploadResponse]:
+        statement = (
+            select(CourseMaterial, Mentor)
+            .join(User, CourseMaterial.uploaded_by == User.id)
+            .join(Mentor, Mentor.user_id == User.id)
+            .where(User.role == UserRole.MENTOR.value)
+            .order_by(CourseMaterial.created_at.desc())
+        )
+        result = await self.session.execute(statement)
+        rows = result.all()
+        return [
+            MentorUploadResponse(
+                id=material.id,
+                course_id=material.course_id,
+                title=material.title,
+                material_type=material.material_type,
+                resource_url=material.resource_url,
+                content=material.content,
+                metadata=material.metadata_json,
+                created_at=material.created_at,
+                updated_at=material.updated_at,
+                mentor_id=mentor.id,
+                mentor_name=mentor.full_name,
+                programme=mentor.programme,
+                track=mentor.track,
+            )
+            for material, mentor in rows
+        ]
 
     async def update_course_material(
         self, *, actor: User, material_id: int, payload: CourseMaterialUpdateRequest

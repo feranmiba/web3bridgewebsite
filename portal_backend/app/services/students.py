@@ -320,6 +320,8 @@ class StudentsService:
             onboarding_status=profile.onboarding_status if profile is not None else None,
             participation=profile.participation if profile is not None else None,
             bio=profile.bio if profile is not None else None,
+            programme=profile.programme if profile is not None else None,
+            track=profile.track if profile is not None else None,
         )
 
     @staticmethod
@@ -341,4 +343,6 @@ class StudentsService:
             "onboarding_status": profile.onboarding_status if profile is not None else None,
             "participation": profile.participation if profile is not None else None,
             "bio": profile.bio if profile is not None else None,
+            "programme": profile.programme if profile is not None else None,
+            "track": profile.track if profile is not None else None,
         }
