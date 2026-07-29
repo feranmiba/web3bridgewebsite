@@ -462,6 +462,8 @@ class Attendance(TimestampMixin, Base):
     student_name: Mapped[str] = mapped_column(String(255), nullable=False)
     date: Mapped[str] = mapped_column(String(50), nullable=False)
     time: Mapped[str] = mapped_column(String(50), nullable=False)
+    time_in: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    time_out: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     attendance_code: Mapped["AttendanceCode"] = relationship(back_populates="attendances")
 

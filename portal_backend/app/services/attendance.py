@@ -179,6 +179,8 @@ class AttendanceService:
                 studentName=att.student_name,
                 date=att.date,
                 time=att.time,
+                timeIn=att.time_in,
+                timeOut=att.time_out,
                 createdAt=att.created_at,
                 updatedAt=att.updated_at,
             )
@@ -221,6 +223,47 @@ class AttendanceService:
             )
 
         code.is_active = False
+        await self.session.commit()
+        await self.session.refresh(code)
+
+        status_str = self._determine_status(code, now)
+        return AttendanceCodeResponse(
+            id=code.id,
+            code=code.code,
+            programme=code.programme,
+            track=code.track,
+            duration=code.duration,
+            expiresAt=code.expires_at,
+            isActive=code.is_active,
+            mentorId=code.mentor_id,
+            status=status_str,
+            createdAt=code.created_at,
+            updatedAt=code.updated_at,
+            signedCount=len(code.attendances),
+        )
+
+    async def reactivate_attendance_code(
+        self, actor: User, code_id: int
+    ) -> AttendanceCodeResponse:
+        mentor = await self._require_mentor(actor)
+        now = datetime.now(UTC)
+
+        stmt = (
+            select(AttendanceCode)
+            .options(selectinload(AttendanceCode.attendances))
+            .where(AttendanceCode.id == code_id, AttendanceCode.mentor_id == mentor.id)
+        )
+        result = await self.session.execute(stmt)
+        code = result.scalar_one_or_none()
+        if code is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Attendance code not found",
+            )
+
+        from datetime import timedelta
+        code.is_active = True
+        code.expires_at = now + timedelta(minutes=code.duration)
         await self.session.commit()
         await self.session.refresh(code)
 
@@ -298,23 +341,50 @@ class AttendanceService:
                 detail="Attendance session has expired",
             )
 
-        # Check for duplicate attendance
-        dup_stmt = select(Attendance).where(
+        # Check for existing attendance
+        stmt = select(Attendance).where(
             Attendance.attendance_code_id == attendance_code.id,
             func.lower(Attendance.student_name) == student_name.lower(),
         )
-        dup_result = await self.session.execute(dup_stmt)
-        if dup_result.scalar_one_or_none() is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="You have already signed attendance for this class.",
+        res = await self.session.execute(stmt)
+        existing_attendance = res.scalar_one_or_none()
+
+        if existing_attendance is not None:
+            if existing_attendance.time_out is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="You have already signed out of attendance for this class.",
+                )
+            
+            existing_attendance.time_out = now.strftime("%H:%M:%S")
+            await self.session.commit()
+            await self.session.refresh(existing_attendance)
+
+            record_resp = AttendanceRecordResponse(
+                id=existing_attendance.id,
+                attendanceCodeId=existing_attendance.attendance_code_id,
+                studentName=existing_attendance.student_name,
+                date=existing_attendance.date,
+                time=existing_attendance.time,
+                timeIn=existing_attendance.time_in,
+                timeOut=existing_attendance.time_out,
+                createdAt=existing_attendance.created_at,
+                updatedAt=existing_attendance.updated_at,
             )
 
+            return StudentAttendanceSubmitResponse(
+                message="Attendance signed out successfully",
+                attendance=record_resp,
+            )
+
+        time_str = now.strftime("%H:%M:%S")
         new_attendance = Attendance(
             attendance_code_id=attendance_code.id,
             student_name=student_name,
             date=now.strftime("%Y-%m-%d"),
-            time=now.strftime("%H:%M:%S"),
+            time=time_str,
+            time_in=time_str,
+            time_out=None,
         )
         self.session.add(new_attendance)
         await self.session.commit()
@@ -326,6 +396,8 @@ class AttendanceService:
             studentName=new_attendance.student_name,
             date=new_attendance.date,
             time=new_attendance.time,
+            timeIn=new_attendance.time_in,
+            timeOut=new_attendance.time_out,
             createdAt=new_attendance.created_at,
             updatedAt=new_attendance.updated_at,
         )
