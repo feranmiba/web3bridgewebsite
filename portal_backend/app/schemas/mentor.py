@@ -12,8 +12,8 @@ class CreateMentorUpdateRequest(BaseModel):
     is_published: bool = False
     send_in_app: bool = True
     send_email: bool = False
-    programme: str = Field(min_length=1, max_length=255)
-    track: str = Field(min_length=1, max_length=255)
+    programme: str | None = Field(default=None, max_length=255)
+    track: str | None = Field(default=None, max_length=255)
 
     @model_validator(mode="after")
     def validate_channels(self) -> "CreateMentorUpdateRequest":
