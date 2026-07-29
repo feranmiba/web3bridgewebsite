@@ -80,6 +80,23 @@ async def deactivate_attendance_code(
     )
 
 
+@router.patch(
+    "/mentor/attendance/codes/{code_id}/reactivate",
+    response_model=AttendanceCodeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reactivate attendance code",
+    description="Immediately sets isActive = true and extends expiresAt for the specified attendance code.",
+)
+async def reactivate_attendance_code(
+    code_id: int,
+    current_user: User = Depends(get_current_mentor_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> AttendanceCodeResponse:
+    return await AttendanceService(db).reactivate_attendance_code(
+        actor=current_user, code_id=code_id
+    )
+
+
 @router.delete(
     "/mentor/attendance/codes/{code_id}",
     response_model=MessageResponse,

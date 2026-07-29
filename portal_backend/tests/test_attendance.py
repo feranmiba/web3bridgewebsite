@@ -132,7 +132,7 @@ def test_mentor_create_duplicate_custom_code_fails() -> None:
         clear_overrides()
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "Attendance code exists. Please choose a different code "
+    assert response.json()["detail"] == "Attendance code already exists. Please choose a different code."
 
 
 def test_mentor_list_attendance_codes() -> None:
@@ -425,3 +425,43 @@ def test_student_submit_deactivated_attendance_fails() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Attendance session has been deactivated by the mentor"
+
+
+def test_mentor_reactivate_attendance_code() -> None:
+    mentor_user = build_mentor_user(user_id=5)
+
+    async def override_mentor_user() -> User:
+        return mentor_user
+
+    async def mock_reactivate(self: AttendanceService, actor: User, code_id: int) -> AttendanceCodeResponse:
+        from datetime import datetime, UTC
+        return AttendanceCodeResponse(
+            id=code_id,
+            code="W3B-14ZNF",
+            programme="web3 solidity",
+            track="web3",
+            duration=30,
+            expiresAt=datetime.now(UTC),
+            isActive=True,
+            mentorId=5,
+            status="Active",
+            createdAt=datetime.now(UTC),
+            updatedAt=datetime.now(UTC),
+            signedCount=0,
+        )
+
+    orig = AttendanceService.reactivate_attendance_code
+    AttendanceService.reactivate_attendance_code = mock_reactivate
+    app.dependency_overrides[deps.get_current_mentor_user] = override_mentor_user
+    app.dependency_overrides[get_db_session] = override_db_session
+
+    try:
+        response = client.patch("/api/v1/mentor/attendance/codes/4/reactivate")
+    finally:
+        AttendanceService.reactivate_attendance_code = orig
+        clear_overrides()
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["isActive"] is True
+    assert data["status"] == "Active"

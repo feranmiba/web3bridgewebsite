@@ -46,6 +46,8 @@ class AttendanceRecordResponse(BaseModel):
     studentName: str = Field(validation_alias=AliasChoices("student_name", "studentName"))
     date: str
     time: str
+    timeIn: str | None = Field(default=None, validation_alias=AliasChoices("time_in", "timeIn"))
+    timeOut: str | None = Field(default=None, validation_alias=AliasChoices("time_out", "timeOut"))
     createdAt: datetime = Field(validation_alias=AliasChoices("created_at", "createdAt"))
     updatedAt: datetime = Field(validation_alias=AliasChoices("updated_at", "updatedAt"))
 
