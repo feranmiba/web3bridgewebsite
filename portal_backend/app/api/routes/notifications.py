@@ -103,6 +103,8 @@ async def create_admin_announcement(
             is_published=payload.is_published,
             send_in_app=payload.send_in_app,
             send_email=payload.send_email,
+            programme=payload.programme,
+            track=payload.track,
         ),
     )
     return AdminAnnouncementResponse(detail="Announcement created", update_id=update.id)

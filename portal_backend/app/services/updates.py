@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, or_, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.portal import (
@@ -241,10 +241,10 @@ class UpdatesService:
             # 2. Programme
             if student_update.programme:
                 if user.role == UserRole.STUDENT.value:
-                    if not profile or profile.programme != student_update.programme:
+                    if not profile or not profile.programme or profile.programme.lower().strip() != student_update.programme.lower().strip():
                         continue
                 elif user.role == UserRole.MENTOR.value:
-                    if not mentor_programme or mentor_programme != student_update.programme:
+                    if not mentor_programme or mentor_programme.lower().strip() != student_update.programme.lower().strip():
                         continue
 
             # 3. Track
@@ -367,6 +367,16 @@ class UpdatesService:
         profile: StudentProfile | None,
         enrolled_course_ids: set[int] | None = None,
     ) -> bool:
+        if student_update.programme:
+            if user.role == UserRole.STUDENT.value:
+                if not profile or not profile.programme or profile.programme.lower().strip() != student_update.programme.lower().strip():
+                    return False
+
+        if student_update.track:
+            if user.role == UserRole.STUDENT.value:
+                if not profile or not profile.track or profile.track.lower().strip() != student_update.track.lower().strip():
+                    return False
+
         if student_update.target_type == UpdateTargetType.ALL_ACTIVE.value:
             return True
         if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
@@ -468,9 +478,9 @@ class UpdatesService:
                 )
             )
             if student_update.programme:
-                statement = statement.where(StudentProfile.programme == student_update.programme)
+                statement = statement.where(func.lower(func.trim(StudentProfile.programme)) == student_update.programme.lower().strip())
             if student_update.track:
-                statement = statement.where(StudentProfile.track == student_update.track)
+                statement = statement.where(func.lower(func.trim(StudentProfile.track)) == student_update.track.lower().strip())
             result = await self.session.execute(statement)
             return [email for email in result.scalars().all() if email]
 
@@ -502,9 +512,9 @@ class UpdatesService:
                 )
             )
             if student_update.programme:
-                statement = statement.where(StudentProfile.programme == student_update.programme)
+                statement = statement.where(func.lower(func.trim(StudentProfile.programme)) == student_update.programme.lower().strip())
             if student_update.track:
-                statement = statement.where(StudentProfile.track == student_update.track)
+                statement = statement.where(func.lower(func.trim(StudentProfile.track)) == student_update.track.lower().strip())
             result = await self.session.execute(statement)
             return [email for email in result.scalars().all() if email]
 
@@ -525,9 +535,9 @@ class UpdatesService:
                 )
             )
             if student_update.programme:
-                statement = statement.where(StudentProfile.programme == student_update.programme)
+                statement = statement.where(func.lower(func.trim(StudentProfile.programme)) == student_update.programme.lower().strip())
             if student_update.track:
-                statement = statement.where(StudentProfile.track == student_update.track)
+                statement = statement.where(func.lower(func.trim(StudentProfile.track)) == student_update.track.lower().strip())
             result = await self.session.execute(statement, {"course_id": course_id})
             return [email for email in result.scalars().all() if email]
 
