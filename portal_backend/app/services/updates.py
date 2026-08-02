@@ -204,6 +204,7 @@ class UpdatesService:
             res = await self.session.execute(stmt, {"email": user.email.lower().strip()})
             course_names = {row[0] for row in res.all() if row[0]}
 
+        mentor = None
         mentor_programme = None
         mentor_track = None
         if user.role == UserRole.MENTOR.value:
@@ -234,44 +235,15 @@ class UpdatesService:
 
         responses: list[StudentUpdateResponse] = []
         for student_update, read_at in rows:
-            # 1. Target Role
-            if student_update.target_role and student_update.target_role != user.role:
+            applies = await self._update_applies_to_user(
+                student_update=student_update,
+                user=user,
+                profile=profile,
+                enrolled_course_ids=enrolled_course_ids,
+                mentor=mentor,
+            )
+            if not applies:
                 continue
-
-            # 2. Programme
-            if student_update.programme:
-                if user.role == UserRole.STUDENT.value:
-                    if not profile or not profile.programme or profile.programme.lower().strip() != student_update.programme.lower().strip():
-                        continue
-                elif user.role == UserRole.MENTOR.value:
-                    if not mentor_programme or mentor_programme.lower().strip() != student_update.programme.lower().strip():
-                        continue
-
-            # 3. Track
-            if student_update.track:
-                if user.role == UserRole.STUDENT.value:
-                    if not profile or not profile.track or profile.track.lower().strip() != student_update.track.lower().strip():
-                        continue
-                elif user.role == UserRole.MENTOR.value:
-                    if not mentor_track or mentor_track.lower().strip() != student_update.track.lower().strip():
-                        continue
-
-            # Check original target fallback
-            if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
-                if student_update.target_ref != str(user.id):
-                    continue
-            elif student_update.target_type == UpdateTargetType.COHORT.value:
-                if not profile or profile.cohort != student_update.target_ref:
-                    continue
-            elif student_update.target_type == UpdateTargetType.COURSE.value:
-                if not student_update.target_ref:
-                    continue
-                try:
-                    course_id = int(student_update.target_ref)
-                except ValueError:
-                    continue
-                if course_id not in enrolled_course_ids:
-                    continue
 
             responses.append(
                 self._build_update_response(student_update=student_update, read_at=read_at)
@@ -289,12 +261,20 @@ class UpdatesService:
         profile = await self._get_profile_by_user_id(user.id)
         enrolled_course_ids = await self._list_enrolled_course_ids_for_email(user.email)
         student_update = await self._get_update_by_id(update_id)
-        if not student_update.is_published or not student_update.send_in_app or not self._update_applies_to_user(
+        mentor = None
+        if user.role == UserRole.MENTOR.value:
+            from app.models.portal import Mentor
+            res = await self.session.execute(select(Mentor).where(Mentor.user_id == user.id))
+            mentor = res.scalar_one_or_none()
+
+        applies = await self._update_applies_to_user(
             student_update=student_update,
             user=user,
             profile=profile,
             enrolled_course_ids=enrolled_course_ids,
-        ):
+            mentor=mentor,
+        )
+        if not student_update.is_published or not student_update.send_in_app or not applies:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Update not found")
 
         read_record = await self._get_read_record(update_id=update_id, user_id=user.id)
@@ -359,38 +339,71 @@ class UpdatesService:
         result = await self.session.execute(statement)
         return result.scalar_one_or_none()
 
-    @staticmethod
-    def _update_applies_to_user(
+    async def _update_applies_to_user(
+        self,
         *,
         student_update: StudentUpdate,
         user: User,
-        profile: StudentProfile | None,
+        profile: StudentProfile | None = None,
         enrolled_course_ids: set[int] | None = None,
+        mentor: Any | None = None,
     ) -> bool:
+        if student_update.target_role and student_update.target_role != user.role:
+            return False
+
         if student_update.programme:
             if user.role == UserRole.STUDENT.value:
                 if not profile or not profile.programme or profile.programme.lower().strip() != student_update.programme.lower().strip():
+                    return False
+            elif user.role == UserRole.MENTOR.value:
+                if not mentor or not mentor.programme or mentor.programme.lower().strip() != student_update.programme.lower().strip():
                     return False
 
         if student_update.track:
             if user.role == UserRole.STUDENT.value:
                 if not profile or not profile.track or profile.track.lower().strip() != student_update.track.lower().strip():
                     return False
+            elif user.role == UserRole.MENTOR.value:
+                if not mentor or not mentor.track or mentor.track.lower().strip() != student_update.track.lower().strip():
+                    return False
 
-        if student_update.target_type == UpdateTargetType.ALL_ACTIVE.value:
-            return True
-        if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
-            return student_update.target_ref == str(user.id)
-        if student_update.target_type == UpdateTargetType.COHORT.value:
-            return profile is not None and student_update.target_ref == profile.cohort
-        if student_update.target_type == UpdateTargetType.COURSE.value:
-            if not student_update.target_ref:
-                return False
-            try:
-                course_id = int(student_update.target_ref)
-            except ValueError:
-                return False
-            return course_id in (enrolled_course_ids or set())
+        if user.role == UserRole.STUDENT.value:
+            if student_update.target_type == UpdateTargetType.ALL_ACTIVE.value:
+                return True
+            if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
+                return student_update.target_ref == str(user.id)
+            if student_update.target_type == UpdateTargetType.COHORT.value:
+                return profile is not None and student_update.target_ref == profile.cohort
+            if student_update.target_type == UpdateTargetType.COURSE.value:
+                if not student_update.target_ref:
+                    return False
+                try:
+                    course_id = int(student_update.target_ref)
+                except ValueError:
+                    return False
+                return course_id in (enrolled_course_ids or set())
+        elif user.role == UserRole.MENTOR.value:
+            if student_update.target_type == UpdateTargetType.ALL_ACTIVE.value:
+                return True
+            if student_update.target_type == UpdateTargetType.INDIVIDUAL.value:
+                return student_update.target_ref == str(user.id)
+            if student_update.target_type == UpdateTargetType.COURSE.value:
+                if not student_update.target_ref:
+                    return False
+                try:
+                    course_id = int(student_update.target_ref)
+                except ValueError:
+                    return False
+                from app.models.portal import MentorCourseMap
+                assigned_stmt = select(MentorCourseMap).where(
+                    MentorCourseMap.mentor_id == mentor.id,
+                    MentorCourseMap.course_id == course_id
+                )
+                assigned_res = await self.session.execute(assigned_stmt)
+                return assigned_res.scalar_one_or_none() is not None
+            if student_update.target_type == UpdateTargetType.COHORT.value:
+                return True
+
         return False
 
     async def _list_enrolled_course_ids_for_email(self, email: str) -> set[int]:
