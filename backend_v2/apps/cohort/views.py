@@ -4,7 +4,7 @@ import threading
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db.models import F, Q
+from django.db.models import F, Prefetch, Q
 from django.forms import ValidationError
 from django.utils import timezone
 from decouple import config
@@ -29,7 +29,9 @@ from .helpers.portal import (
     execute_portal_invite_for_paid_cohort,
     send_portal_invite_for_participant,
 )
+from .helpers.cohort_label import apply_listing_scope, filter_by_cohort
 from .helpers.participant_backfill import autocorrect_participant_links
+from .helpers.pricing import resolved_fees
 from backend_v2.scripts.mail import send_bulk_email
 from payment.models import DiscountCode, Payment
 from utils.enums.models import RegistrationStatus
@@ -255,14 +257,25 @@ class CoursesViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.ViewSet
 
     @decorators.action(detail=False, methods=["get"])
     def all(self, request):
-        serializer = self.serializer_class.List(self.get_queryset(), many=True)
+        query_set = apply_listing_scope(
+            self.get_queryset(),
+            scope=request.query_params.get("scope"),
+            cohort=request.query_params.get("cohort"),
+            open_field="registration__is_open",
+            cohort_fields=("registration__cohort",),
+        )
+        serializer = self.serializer_class.List(query_set, many=True)
         return requestUtils.success_response(
             data=serializer.data, http_status=status.HTTP_200_OK
         )
 
     @decorators.action(detail=False, methods=["get"])
     def all_opened(self, request):
-        query_set = self.get_queryset().filter(status=True)
+        query_set = filter_by_cohort(
+            self.get_queryset().filter(status=True),
+            request.query_params.get("cohort"),
+            "registration__cohort",
+        )
         serializer = self.serializer_class.List(query_set, many=True)
         return requestUtils.success_response(
             data=serializer.data, http_status=status.HTTP_200_OK
@@ -303,6 +316,15 @@ class CoursesViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.ViewSet
                 serializer.errors,
                 http_status=status.HTTP_400_BAD_REQUEST,
             )
+
+
+def _registration_queryset():
+    return models.Registration.objects.prefetch_related(
+        Prefetch(
+            "courses",
+            queryset=models.Course.objects.select_related("registration"),
+        )
+    ).order_by("-id")
 
 
 class RegistrationViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.ViewSet):
@@ -373,14 +395,25 @@ class RegistrationViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vi
 
     @decorators.action(detail=False, methods=["get"])
     def all(self, request):
-        serializer = self.serializer_class.List(self.queryset, many=True)
+        query_set = apply_listing_scope(
+            _registration_queryset(),
+            scope=request.query_params.get("scope"),
+            cohort=request.query_params.get("cohort"),
+            open_field="is_open",
+            cohort_fields=("cohort",),
+        )
+        serializer = self.serializer_class.List(query_set, many=True)
         return requestUtils.success_response(
             data=serializer.data, http_status=status.HTTP_200_OK
         )
 
     @decorators.action(detail=False, methods=["get"])
     def all_opened(self, request):
-        query_set = self.queryset.filter(is_open=True)
+        query_set = filter_by_cohort(
+            _registration_queryset().filter(is_open=True),
+            request.query_params.get("cohort"),
+            "cohort",
+        )
         serializer = self.serializer_class.List(query_set, many=True)
         return requestUtils.success_response(
             data=serializer.data, http_status=status.HTTP_200_OK
@@ -453,7 +486,13 @@ class ParticipantViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vie
             models.Participant.objects.select_related(
                 "course", "registration", "course__registration"
             )
-            .prefetch_related("course__images")
+            .prefetch_related(
+                "course__images",
+                Prefetch(
+                    "registration__courses",
+                    queryset=models.Course.objects.select_related("registration"),
+                ),
+            )
             .order_by("-created_at")
         )
 
@@ -805,10 +844,17 @@ class ParticipantViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vie
                 "id": participant.course_id,
                 "name": course_name or None,
             },
+            "venue": participant.venue,
+            "fees": resolved_fees(
+                course=participant.course,
+                registration=participant.registration,
+            ),
             "registration": {
                 "id": participant.registration_id,
                 "name": getattr(participant.registration, "name", None),
                 "cohort": getattr(participant.registration, "cohort", None),
+                "online_fee": getattr(participant.registration, "online_fee", None),
+                "onsite_fee": getattr(participant.registration, "onsite_fee", None),
             },
             "assessment_gate": assessment_gate,
             "created_at": participant.created_at,
@@ -983,7 +1029,12 @@ class ParticipantViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vie
                 http_status=status.HTTP_400_BAD_REQUEST,
             )
 
-        queryset = self.get_queryset().filter(cohort=cohort, payment_status=True)
+        queryset = filter_by_cohort(
+            self.get_queryset().filter(payment_status=True),
+            cohort,
+            "cohort",
+            "registration__cohort",
+        )
         serializer = self.serializer_class.List(queryset, many=True)
         return requestUtils.success_response(data=serializer.data, http_status=status.HTTP_200_OK)
 
@@ -1357,8 +1408,12 @@ class ParticipantViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vie
         # Calculate offset
         offset = (page - 1) * limit
 
-        # Create cache key based on page and limit
-        cache_key = f"participants_all_page_{page}_limit_{limit}"
+        cohort = (request.GET.get("cohort") or "").strip()
+        scope = (request.GET.get("scope") or "current").strip().lower()
+        # Create cache key based on page, limit, cohort, and current/previous scope
+        cache_key = (
+            f"participants_all_page_{page}_limit_{limit}_scope_{scope}_cohort_{cohort}"
+        )
 
         # Cache first. Do not run full-table autocorrect here: it scans every participant and
         # exceeds HTTP gateway timeouts (client 504 while Django still logs 200 afterward).
@@ -1375,8 +1430,15 @@ class ParticipantViewSet(GuestReadAllWriteAdminOnlyPermissionMixin, viewsets.Vie
                 data=cached_data, http_status=status.HTTP_200_OK
             )
 
-        # Get optimized queryset
-        queryset = self.get_queryset()
+        # Current cohort by default. scope=previous is previous only.
+        # An explicit cohort returns that cohort alone.
+        queryset = apply_listing_scope(
+            self.get_queryset(),
+            scope=scope,
+            cohort=cohort,
+            open_field="registration__is_open",
+            cohort_fields=("cohort", "registration__cohort"),
+        )
 
         # Get one extra item to check if there's a next page (without expensive count)
         paginated_queryset = queryset[offset : offset + limit + 1]

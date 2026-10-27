@@ -136,17 +136,12 @@ class ParticipantCreateRegistrationPersistenceTests(TestCase):
         self.assertEqual(p.registration_id, self.reg.pk)
         self.assertEqual(p.cohort, self.reg.cohort)
 
-    def test_create_uses_active_cohort_and_normalizes_roman_token(self):
+    def test_create_keeps_the_linked_programme_cohort(self):
         from cohort.models import Course, Participant, Registration
 
         stale_reg = Registration.objects.create(
             name="Web3 Cohort XIV",
             cohort="xiv",
-            is_open=True,
-        )
-        Registration.objects.create(
-            name="Web3 Cohort XV",
-            cohort="xv",
             is_open=True,
         )
         stale_course = Course.objects.create(
@@ -168,7 +163,17 @@ class ParticipantCreateRegistrationPersistenceTests(TestCase):
 
         p = Participant.objects.get(email="active_cohort@example.com")
         self.assertEqual(p.registration_id, stale_reg.pk)
-        self.assertEqual(p.cohort, "Cohort XV")
+        self.assertEqual(p.cohort, "Cohort XIV")
+
+        Registration.objects.create(
+            name="Web3 Cohort XV",
+            cohort="xv",
+            is_open=True,
+        )
+        stale_reg.refresh_from_db()
+        p.refresh_from_db()
+        self.assertFalse(stale_reg.is_open)
+        self.assertEqual(p.cohort, "Cohort XIV")
 
     def test_create_resolves_open_registration_when_omitted(self):
         from cohort.models import Participant
@@ -221,6 +226,7 @@ class ParticipantCreateRegistrationPersistenceTests(TestCase):
             self.CREATE_URL,
             self._base_payload(
                 email="no_reg@example.com",
+                course=self.course_unlinked.pk,
                 registration=None,
             ),
             format="json",
@@ -332,7 +338,279 @@ class CourseListRegistrationSerializationTests(TestCase):
             registration=closed,
         )
         data = CourseSerializer.List(course).data
-        self.assertEqual(data["registration"], closed.pk)
+        self.assertEqual(data["registration_id"], closed.pk)
+        self.assertEqual(data["registration"]["id"], closed.pk)
+        self.assertEqual(data["registration"]["cohort"], "Cohort-PAST")
+        self.assertIn("fees", data)
+
+
+@override_settings(
+    SECURE_SSL_REDIRECT=False,
+    PORTAL_ONBOARDING_URL="",
+    PORTAL_INTERNAL_API_KEY="",
+)
+class OnsiteOnlineAndCohortLinkTests(TestCase):
+    CREATE_URL = "/api/v2/cohort/participant/"
+
+    def setUp(self):
+        self.client = APIClient()
+        from cohort.models import Course, Registration
+
+        self.reg = Registration.objects.create(
+            name="Web3 Cohort XV",
+            cohort="xv",
+            is_open=True,
+            online_fee="₦40,000",
+            onsite_fee="₦80,000",
+        )
+        self.other = Registration.objects.create(
+            name="Other intake",
+            cohort="Cohort XIV",
+            is_open=True,
+            online_fee="₦10,000",
+            onsite_fee="₦20,000",
+        )
+        self.course = Course.objects.create(
+            name="Solidity",
+            description="d",
+            extra_info="e",
+            venue=["online", "onsite"],
+            registration=self.reg,
+            online_fee="₦50,000",
+        )
+
+    def _payload(self, **overrides):
+        payload = {
+            "name": "Test User",
+            "wallet_address": "0x1234567890123456789012345678901234567890",
+            "email": "mode@example.com",
+            "course": self.course.pk,
+            "city": "Lagos",
+            "country": "NG",
+            "gender": "male",
+            "venue": "onsite",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_registration_normalizes_cohort_and_lists_serialized_courses(self):
+        self.reg.refresh_from_db()
+        self.assertEqual(self.reg.cohort, "Cohort XV")
+
+        response = self.client.get("/api/v2/cohort/registration/all/?cohort=xv")
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["data"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], self.reg.pk)
+        self.assertEqual(rows[0]["courses"][0]["id"], self.course.pk)
+        self.assertEqual(rows[0]["courses"][0]["name"], "Solidity")
+        self.assertEqual(rows[0]["courses"][0]["fees"]["online"], "₦50,000")
+        self.assertEqual(rows[0]["courses"][0]["fees"]["onsite"], "₦80,000")
+
+    def test_course_list_filters_by_programme_cohort(self):
+        response = self.client.get("/api/v2/cohort/course/all/?cohort=Cohort%20XV")
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["data"]
+        self.assertEqual([row["id"] for row in rows], [self.course.pk])
+        self.assertEqual(rows[0]["fees"]["onsite"], "₦80,000")
+
+    def test_create_requires_online_or_onsite(self):
+        missing = self.client.post(
+            self.CREATE_URL,
+            self._payload(email="missing-mode@example.com", venue=""),
+            format="json",
+        )
+        self.assertEqual(missing.status_code, 400, missing.content)
+
+        rejected = self.client.post(
+            self.CREATE_URL,
+            self._payload(email="bad-mode@example.com", venue="hybrid"),
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400, rejected.content)
+
+    def test_create_rejects_mode_the_course_does_not_offer(self):
+        from cohort.models import Course
+
+        online_only = Course.objects.create(
+            name="Online only",
+            description="d",
+            extra_info="e",
+            venue=["online"],
+            registration=self.reg,
+        )
+        response = self.client.post(
+            self.CREATE_URL,
+            self._payload(
+                email="onsite-blocked@example.com",
+                course=online_only.pk,
+                venue="onsite",
+            ),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_create_ignores_client_cohort_and_registration(self):
+        from cohort.models import Participant
+
+        response = self.client.post(
+            self.CREATE_URL,
+            self._payload(
+                email="derived@example.com",
+                registration=self.other.pk,
+                cohort="not a real cohort",
+                venue="onsite",
+            ),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        participant = Participant.objects.get(email="derived@example.com")
+        self.assertEqual(participant.registration_id, self.reg.pk)
+        self.assertEqual(participant.cohort, "Cohort XV")
+        self.assertEqual(participant.venue, "onsite")
+        body = response.json()["data"]
+        self.assertEqual(body["fee"], "₦80,000")
+        self.assertEqual(body["registration"]["id"], self.reg.pk)
+
+    def test_update_replaces_a_mismatched_programme(self):
+        from cohort.models import Participant
+        from cohort.serializers import ParticipantSerializer
+
+        participant = Participant.objects.create(
+            name="N",
+            email="relink@example.com",
+            wallet_address="0x1",
+            course=self.course,
+            venue="online",
+        )
+        Participant.objects.filter(pk=participant.pk).update(
+            registration=self.other,
+            cohort="Cohort XIV",
+        )
+        participant.refresh_from_db()
+        self.assertEqual(participant.registration_id, self.other.pk)
+
+        serializer = ParticipantSerializer.Update(
+            participant,
+            data={"registration": self.other.pk, "cohort": "whatever", "venue": "onsite"},
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        participant.refresh_from_db()
+        self.assertEqual(participant.registration_id, self.reg.pk)
+        self.assertEqual(participant.cohort, "Cohort XV")
+        self.assertEqual(participant.venue, "onsite")
+
+
+@override_settings(
+    SECURE_SSL_REDIRECT=False,
+    PORTAL_ONBOARDING_URL="",
+    PORTAL_INTERNAL_API_KEY="",
+)
+class PreviousCohortScopeTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        from cohort.models import Course, Participant, Registration
+
+        self.previous = Registration.objects.create(
+            name="Web3 Cohort XIV",
+            cohort="Cohort XIV",
+            is_open=True,
+        )
+        self.current = Registration.objects.create(
+            name="Web3 Cohort XV",
+            cohort="Cohort XV",
+            is_open=True,
+        )
+        self.web2 = Registration.objects.create(
+            name="Web2 Cohort XV",
+            cohort="Cohort XV",
+            is_open=True,
+        )
+        self.previous.refresh_from_db()
+        self.current.refresh_from_db()
+        self.web2.refresh_from_db()
+        self.previous_course = Course.objects.create(
+            name="Old Solidity",
+            description="d",
+            extra_info="e",
+            registration=self.previous,
+        )
+        self.current_course = Course.objects.create(
+            name="Current Solidity",
+            description="d",
+            extra_info="e",
+            registration=self.current,
+        )
+        self.previous_participant = Participant.objects.create(
+            name="Old Student",
+            email="old@example.com",
+            wallet_address="0x1",
+            course=self.previous_course,
+            venue="online",
+        )
+        self.current_participant = Participant.objects.create(
+            name="Current Student",
+            email="current@example.com",
+            wallet_address="0x2",
+            course=self.current_course,
+            venue="onsite",
+        )
+
+    def test_newer_cohort_closes_the_previous_one_on_the_same_track(self):
+        self.assertFalse(self.previous.is_open)
+        self.assertTrue(self.current.is_open)
+        self.assertTrue(self.web2.is_open)
+
+    def test_reopening_a_previous_cohort_does_not_leave_it_active(self):
+        self.previous.is_open = True
+        self.previous.save()
+        self.previous.refresh_from_db()
+        self.current.refresh_from_db()
+        self.assertFalse(self.previous.is_open)
+        self.assertTrue(self.current.is_open)
+
+    def test_default_lists_are_current_and_previous_is_separate(self):
+        current_regs = self.client.get("/api/v2/cohort/registration/all/")
+        previous_regs = self.client.get("/api/v2/cohort/registration/all/?scope=previous")
+        self.assertEqual(current_regs.status_code, 200, current_regs.content)
+        self.assertEqual(
+            {row["id"] for row in current_regs.json()["data"]},
+            {self.current.pk, self.web2.pk},
+        )
+        self.assertEqual(
+            [row["id"] for row in previous_regs.json()["data"]],
+            [self.previous.pk],
+        )
+
+        current_courses = self.client.get("/api/v2/cohort/course/all/")
+        previous_courses = self.client.get("/api/v2/cohort/course/all/?scope=previous")
+        self.assertEqual(
+            [row["id"] for row in current_courses.json()["data"]],
+            [self.current_course.pk],
+        )
+        self.assertEqual(
+            [row["id"] for row in previous_courses.json()["data"]],
+            [self.previous_course.pk],
+        )
+
+        current_people = self.client.get("/api/v2/cohort/participant/all/")
+        previous_people = self.client.get("/api/v2/cohort/participant/all/?scope=previous")
+        self.assertEqual(
+            [row["id"] for row in current_people.json()["data"]["results"]],
+            [self.current_participant.pk],
+        )
+        self.assertEqual(
+            [row["id"] for row in previous_people.json()["data"]["results"]],
+            [self.previous_participant.pk],
+        )
+
+    def test_explicit_cohort_returns_that_cohort_only(self):
+        response = self.client.get("/api/v2/cohort/registration/all/?cohort=Cohort%20XIV")
+        self.assertEqual(
+            [row["id"] for row in response.json()["data"]],
+            [self.previous.pk],
+        )
 
 
 @override_settings(
@@ -371,6 +649,11 @@ class VerifyPaymentAndConfirmationPaymentStatusTests(TestCase):
             extra_info="Extra",
             registration=self.reg_new,
         )
+        # Opening XV closes XIV. These payment cases still need both programmes open,
+        # so restore that without going through Registration.save.
+        Registration.objects.filter(
+            pk__in=[self.reg_old.pk, self.reg_new.pk]
+        ).update(is_open=True)
         # Older row: still unpaid (the one the user paid for)
         self.participant_unpaid = Participant.objects.create(
             name="Jane",

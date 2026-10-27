@@ -146,9 +146,150 @@ def resolve_active_cohort_label(*, registration=None, course=None) -> str | None
     return linked_label
 
 
+_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+
+
+def _token_to_int(token: str) -> int | None:
+    token = (token or "").strip().upper()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    if any(char not in _ROMAN_VALUES for char in token):
+        return None
+    total = 0
+    previous = 0
+    for char in reversed(token):
+        value = _ROMAN_VALUES[char]
+        if value < previous:
+            total -= value
+        else:
+            total += value
+            previous = value
+    return total or None
+
+
+def cohort_number(raw_label: str | None) -> int | None:
+    """Numeric rank of a cohort label. ``Cohort XIV``, ``xiv``, and ``Cohort-14`` all work."""
+    label = (raw_label or "").strip()
+    if not label:
+        return None
+    master_match = re.search(
+        r"master\s*class(?:\s*cohort)?\s*([ivxlcdm]+|\d+)",
+        label,
+        flags=re.IGNORECASE,
+    )
+    if master_match:
+        return _token_to_int(master_match.group(1))
+    cohort_match = re.search(
+        r"cohort[\s\-]*([ivxlcdm]+|\d+)",
+        label,
+        flags=re.IGNORECASE,
+    )
+    if cohort_match:
+        return _token_to_int(cohort_match.group(1))
+    return _token_to_int(label)
+
+
+def deactivate_stale_registrations() -> int:
+    """
+    Close open programmes whose cohort is older than the current one on the same track.
+
+    Web3 Cohort XIV closes when Web3 Cohort XV is open. Web2 Cohort XV stays open,
+    because it is a different track. Programmes in the same cohort number stay open together.
+    """
+    registration_model = apps.get_model("cohort", "Registration")
+    grouped: dict[str, list] = {}
+    for registration in registration_model.objects.filter(is_open=True):
+        track_key = _course_track_key(
+            registration_name=registration.name or "",
+            cohort_label=registration.cohort or "",
+            course_name="",
+        )
+        grouped.setdefault(track_key, []).append(registration)
+
+    stale_ids: list[int] = []
+    for registrations in grouped.values():
+        numbers = [
+            cohort_number(registration.cohort or registration.name)
+            for registration in registrations
+        ]
+        ranked = [number for number in numbers if number is not None]
+        if not ranked:
+            continue
+        current_number = max(ranked)
+        for registration, number in zip(registrations, numbers):
+            if number is not None and number < current_number:
+                stale_ids.append(registration.pk)
+    if not stale_ids:
+        return 0
+    return registration_model.objects.filter(pk__in=stale_ids, is_open=True).update(
+        is_open=False
+    )
+
+
+def apply_listing_scope(
+    queryset,
+    *,
+    scope: str | None,
+    cohort: str | None,
+    open_field: str,
+    cohort_fields: tuple[str, ...],
+):
+    """
+    Default lists are the current cohort only.
+
+    ``scope=previous`` returns closed cohorts and leaves the current ones out.
+    A ``cohort`` value is a request for that cohort alone, current or previous.
+    """
+    cohort = (cohort or "").strip()
+    if cohort:
+        return filter_by_cohort(queryset, cohort, *cohort_fields)
+    if (scope or "current").strip().lower() == "previous":
+        return queryset.filter(**{open_field: False})
+    return queryset.filter(**{open_field: True})
+
+
+def cohort_label_for_registration(registration) -> str | None:
+    """
+    Cohort label for one programme.
+
+    Uses that registration's own ``cohort`` (or its name), not a different
+    open intake of the same track.
+    """
+    if registration is None:
+        return None
+    raw = (getattr(registration, "cohort", None) or "").strip() or (
+        getattr(registration, "name", None) or ""
+    ).strip()
+    return normalize_cohort_label(raw)
+
+
 def fit_participant_cohort(label: str | None) -> str | None:
     if label is None:
         return None
     participant_model = apps.get_model("cohort", "Participant")
     max_len = participant_model._meta.get_field("cohort").max_length
     return label[:max_len]
+
+
+def filter_by_cohort(queryset, raw: str | None, *fields: str):
+    """
+    Match a cohort query against one or more text fields.
+
+    ``xv`` and ``Cohort XV`` hit the same rows. An empty query does not filter.
+    """
+    from django.db.models import Q
+
+    label = (raw or "").strip()
+    if not label or not fields:
+        return queryset
+    normalized = normalize_cohort_label(label)
+    labels = {label}
+    if normalized:
+        labels.add(normalized)
+    combined = Q()
+    for field in fields:
+        for item in labels:
+            combined |= Q(**{f"{field}__iexact": item})
+    return queryset.filter(combined)

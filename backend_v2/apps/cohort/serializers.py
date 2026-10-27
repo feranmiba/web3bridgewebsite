@@ -1,7 +1,13 @@
 from django.db import IntegrityError
 from rest_framework import serializers
 from . import models
-from .helpers.cohort_label import fit_participant_cohort, resolve_active_cohort_label
+from .helpers.cohort_label import cohort_label_for_registration, fit_participant_cohort
+from .helpers.pricing import (
+    fee_for_mode,
+    normalize_participation_mode,
+    offered_modes,
+    resolved_fees,
+)
 from utils.serializers import ImageSerializer
 from utils.models import Image
 from .literals import (
@@ -59,6 +65,72 @@ def _merge_registration_and_program_ids(attrs: dict) -> dict:
     return attrs
 
 
+def _programme_cohort(registration) -> str | None:
+    return fit_participant_cohort(cohort_label_for_registration(registration))
+
+
+def _validate_venue_list(value):
+    """Course.venue stores the modes offered: online, onsite, or both."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise serializers.ValidationError(
+            "Venue must be a list containing 'online', 'onsite', or both."
+        )
+    cleaned = []
+    for item in value:
+        mode = normalize_participation_mode(item)
+        if mode is None:
+            raise serializers.ValidationError(
+                "Each venue must be 'online' or 'onsite'."
+            )
+        if mode not in cleaned:
+            cleaned.append(mode)
+    return cleaned
+
+
+class RegistrationSummarySerializer(serializers.ModelSerializer):
+    """Programme fields embedded on a course. Does not include courses."""
+
+    class Meta:
+        model = models.Registration
+        fields = [
+            "id",
+            "name",
+            "is_open",
+            "start_date",
+            "end_date",
+            "cohort",
+            "registrationFee",
+            "online_fee",
+            "onsite_fee",
+        ]
+
+
+class CourseSummarySerializer(serializers.ModelSerializer):
+    """Course fields embedded on a registration. Does not include the programme."""
+
+    fees = serializers.SerializerMethodField()
+
+    class Meta:
+        model = models.Course
+        fields = [
+            "id",
+            "name",
+            "description",
+            "venue",
+            "extra_info",
+            "status",
+            "duration",
+            "online_fee",
+            "onsite_fee",
+            "fees",
+        ]
+
+    def get_fees(self, obj):
+        return resolved_fees(course=obj, registration=getattr(obj, "registration", None))
+
+
 # Serializer
 # Course Serializer
 class CourseSerializer:
@@ -75,9 +147,14 @@ class CourseSerializer:
                 "images",
                 "registration",
                 "duration",
+                "online_fee",
+                "onsite_fee",
             ]
             extra_kwargs = {"venue": {"required": True}}
             ref_name = COURSE_REF_NAME
+
+        def validate_venue(self, value):
+            return _validate_venue_list(value)
 
         def create(self, validated_data):
             images_data = validated_data.pop("images", [])
@@ -93,6 +170,9 @@ class CourseSerializer:
 
     class List(serializers.ModelSerializer):
         images = ImageSerializer(many=True, read_only=True)
+        registration = RegistrationSummarySerializer(read_only=True)
+        registration_id = serializers.IntegerField(read_only=True)
+        fees = serializers.SerializerMethodField()
 
         class Meta:
             model = models.Course
@@ -105,11 +185,21 @@ class CourseSerializer:
                 "images",
                 "status",
                 "registration",
+                "registration_id",
                 "duration",
+                "online_fee",
+                "onsite_fee",
+                "fees",
             ]
+
+        def get_fees(self, obj):
+            return resolved_fees(course=obj, registration=getattr(obj, "registration", None))
 
     class Retrieve(serializers.ModelSerializer):
         images = ImageSerializer(many=True, read_only=True)
+        registration = RegistrationSummarySerializer(read_only=True)
+        registration_id = serializers.IntegerField(read_only=True)
+        fees = serializers.SerializerMethodField()
 
         class Meta:
             model = models.Course
@@ -122,8 +212,15 @@ class CourseSerializer:
                 "images",
                 "status",
                 "registration",
+                "registration_id",
                 "duration",
+                "online_fee",
+                "onsite_fee",
+                "fees",
             ]
+
+        def get_fees(self, obj):
+            return resolved_fees(course=obj, registration=getattr(obj, "registration", None))
 
     class Update(serializers.ModelSerializer):
         images = serializers.ListField(child=serializers.ImageField(), required=False)
@@ -141,8 +238,13 @@ class CourseSerializer:
                 "status",
                 "registration",
                 "duration",
+                "online_fee",
+                "onsite_fee",
             ]
             extra_kwargs = {field: {"required": False} for field in fields}
+
+        def validate_venue(self, value):
+            return _validate_venue_list(value)
 
         def update(self, instance, validated_data):
             images_data = validated_data.pop("images", [])
@@ -168,6 +270,8 @@ class CourseSerializer:
                 "registration", instance.registration
             )
             instance.duration = validated_data.get("duration", instance.duration)
+            instance.online_fee = validated_data.get("online_fee", instance.online_fee)
+            instance.onsite_fee = validated_data.get("onsite_fee", instance.onsite_fee)
             instance.save()
             return instance
 
@@ -183,6 +287,8 @@ class RegistrationSerializer:
                 "start_date",
                 "end_date",
                 "registrationFee",
+                "online_fee",
+                "onsite_fee",
                 "cohort",
             ]
             ref_name = REGISTRATION_REF_NAME
@@ -193,6 +299,8 @@ class RegistrationSerializer:
             return registration_obj
 
     class List(serializers.ModelSerializer):
+        courses = CourseSummarySerializer(many=True, read_only=True)
+
         class Meta:
             model = models.Registration
             fields = [
@@ -202,12 +310,16 @@ class RegistrationSerializer:
                 "start_date",
                 "end_date",
                 "registrationFee",
+                "online_fee",
+                "onsite_fee",
                 "courses",
                 "cohort",
             ]
             ref_name = REGISTRATION_REF_NAME
 
     class Retrieve(serializers.ModelSerializer):
+        courses = CourseSummarySerializer(many=True, read_only=True)
+
         class Meta:
             model = models.Registration
             fields = [
@@ -217,6 +329,8 @@ class RegistrationSerializer:
                 "start_date",
                 "end_date",
                 "registrationFee",
+                "online_fee",
+                "onsite_fee",
                 "courses",
                 "cohort",
             ]
@@ -232,6 +346,8 @@ class RegistrationSerializer:
                 "start_date",
                 "end_date",
                 "registrationFee",
+                "online_fee",
+                "onsite_fee",
                 "cohort",
             ]
             ref_name = REGISTRATION_REF_NAME
@@ -245,6 +361,8 @@ class RegistrationSerializer:
             instance.registrationFee = validated_data.get(
                 "registrationFee", instance.registrationFee
             )
+            instance.online_fee = validated_data.get("online_fee", instance.online_fee)
+            instance.onsite_fee = validated_data.get("onsite_fee", instance.onsite_fee)
             instance.cohort = validated_data.get("cohort", instance.cohort)
             instance.save()
             return instance
@@ -284,7 +402,10 @@ class ParticipantSerializer:
             default="",
             max_length=64,
         )
-        venue = serializers.CharField(required=True)
+        venue = serializers.ChoiceField(
+            choices=models.ParticipationMode.choices,
+            required=True,
+        )
 
         class Meta:
             model = models.Participant
@@ -294,6 +415,12 @@ class ParticipantSerializer:
 
         def validate_number(self, value):
             return _validate_loose_phone_number(value)
+
+        def validate_venue(self, value):
+            mode = normalize_participation_mode(value)
+            if mode is None:
+                raise serializers.ValidationError("Choose online or onsite.")
+            return mode
 
         def validate(self, attrs):
             course = attrs.get("course")
@@ -317,10 +444,19 @@ class ParticipantSerializer:
                         )
                     }
                 )
+            mode = attrs.get("venue")
+            if mode not in offered_modes(course):
+                raise serializers.ValidationError(
+                    {
+                        "venue": (
+                            "Choose a mode this course is offered in: "
+                            + " or ".join(offered_modes(course))
+                            + "."
+                        )
+                    }
+                )
             email = (attrs.get("email") or "").strip()
-            cohort_value = fit_participant_cohort(
-                resolve_active_cohort_label(registration=linked, course=course)
-            )
+            cohort_value = _programme_cohort(linked)
             existing_participant = models.Participant.objects.filter(
                 email__iexact=email,
                 cohort=cohort_value,
@@ -364,9 +500,7 @@ class ParticipantSerializer:
                     }
                 )
             validated_data["registration"] = linked
-            validated_data["cohort"] = fit_participant_cohort(
-                resolve_active_cohort_label(registration=linked, course=course)
-            )
+            validated_data["cohort"] = _programme_cohort(linked)
             try:
                 return models.Participant.objects.create(**validated_data)
             except IntegrityError:
@@ -405,20 +539,50 @@ class ParticipantSerializer:
     class List(serializers.ModelSerializer):
         course = CourseSerializer.Retrieve(read_only=True)
         registration = RegistrationSerializer.Retrieve(read_only=True)
+        fees = serializers.SerializerMethodField()
+        fee = serializers.SerializerMethodField()
 
         class Meta:
             model = models.Participant
             fields = "__all__"
             ref_name = PARTICIPANT_REF_NAME
+
+        def get_fees(self, obj):
+            return resolved_fees(
+                course=getattr(obj, "course", None),
+                registration=getattr(obj, "registration", None),
+            )
+
+        def get_fee(self, obj):
+            return fee_for_mode(
+                mode=obj.venue,
+                course=getattr(obj, "course", None),
+                registration=getattr(obj, "registration", None),
+            )
 
     class Retrieve(serializers.ModelSerializer):
         course = CourseSerializer.Retrieve(read_only=True)
         registration = RegistrationSerializer.Retrieve(read_only=True)
+        fees = serializers.SerializerMethodField()
+        fee = serializers.SerializerMethodField()
 
         class Meta:
             model = models.Participant
             fields = "__all__"
             ref_name = PARTICIPANT_REF_NAME
+
+        def get_fees(self, obj):
+            return resolved_fees(
+                course=getattr(obj, "course", None),
+                registration=getattr(obj, "registration", None),
+            )
+
+        def get_fee(self, obj):
+            return fee_for_mode(
+                mode=obj.venue,
+                course=getattr(obj, "course", None),
+                registration=getattr(obj, "registration", None),
+            )
 
     class Update(serializers.ModelSerializer):
         class Meta:
@@ -448,15 +612,45 @@ class ParticipantSerializer:
         def validate_number(self, value):
             return _validate_loose_phone_number(value)
 
+        def validate_venue(self, value):
+            mode = normalize_participation_mode(value)
+            if mode is None:
+                raise serializers.ValidationError("Choose online or onsite.")
+            return mode
+
+        def validate(self, attrs):
+            course = attrs.get("course", getattr(self.instance, "course", None))
+            if "venue" in attrs and course is not None:
+                if attrs["venue"] not in offered_modes(course):
+                    raise serializers.ValidationError(
+                        {
+                            "venue": (
+                                "Choose a mode this course is offered in: "
+                                + " or ".join(offered_modes(course))
+                                + "."
+                            )
+                        }
+                    )
+            if course is not None and "course" in attrs and course.registration_id is None:
+                raise serializers.ValidationError(
+                    {
+                        "course": (
+                            "This course has no programme linked. In admin, set "
+                            "Course → registration to your programme."
+                        )
+                    }
+                )
+            return attrs
+
         def update(self, instance, validated_data):
+            # Programme and cohort are derived from the course. Ignore client values.
+            validated_data.pop("registration", None)
+            validated_data.pop("cohort", None)
             instance.name = validated_data.get("name", instance.name)
             instance.wallet_address = validated_data.get(
                 "wallet_address", instance.wallet_address
             )
             instance.email = validated_data.get("email", instance.email)
-            instance.registration = validated_data.get(
-                "registration", instance.registration
-            )
             instance.status = validated_data.get("status", instance.status)
             instance.motivation = validated_data.get("motivation", instance.motivation)
             instance.achievement = validated_data.get(
@@ -465,16 +659,36 @@ class ParticipantSerializer:
             instance.city = validated_data.get("city", instance.city)
             instance.state = validated_data.get("state", instance.state)
             instance.country = validated_data.get("country", instance.country)
-            # instance.duration= validated_data.get("duration", instance.duration)
             instance.gender = validated_data.get("gender", instance.gender)
             instance.github = validated_data.get("github", instance.github)
             instance.number = validated_data.get("number", instance.number)
             instance.course = validated_data.get("course", instance.course)
-            instance.cohort = validated_data.get("cohort", instance.cohort)
             instance.venue = validated_data.get("venue", instance.venue)
             instance.payment_status = validated_data.get(
                 "payment_status", instance.payment_status
             )
+            course = instance.course
+            if course is not None and course.registration_id:
+                instance.registration = course.registration
+                label = _programme_cohort(course.registration)
+                if label and (instance.cohort or "").strip() != label:
+                    clash = (
+                        models.Participant.objects.filter(
+                            email__iexact=(instance.email or "").strip(),
+                            cohort=label,
+                        )
+                        .exclude(pk=instance.pk)
+                        .exists()
+                    )
+                    if clash:
+                        raise serializers.ValidationError(
+                            {
+                                "email": (
+                                    "Participant already registered for this cohort"
+                                )
+                            }
+                        )
+                    instance.cohort = label
 
             instance.save()
             return instance

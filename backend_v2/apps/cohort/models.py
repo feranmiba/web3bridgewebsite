@@ -1,11 +1,20 @@
 from django.db import models
-from django.forms import ValidationError
 from django.utils.translation import gettext_lazy as _
 from utils.helpers.models import BaseModelBaseMixin, CloudinaryDeleteMixin
 from utils.models import Image
 from utils.enums.models import RegistrationStatus
 from .helpers.model import testimonial_image_location
-from .helpers.cohort_label import fit_participant_cohort, resolve_active_cohort_label
+from .helpers.cohort_label import (
+    cohort_label_for_registration,
+    deactivate_stale_registrations,
+    fit_participant_cohort,
+    normalize_cohort_label,
+)
+
+
+class ParticipationMode(models.TextChoices):
+    ONLINE = "online", _("Online")
+    ONSITE = "onsite", _("Onsite")
 
 
 # Model
@@ -14,7 +23,29 @@ class Course(BaseModelBaseMixin, models.Model):
     name = models.CharField(_("course name"), max_length=1000, blank=False, null=False)
     description = models.TextField(_("description"), blank=False, null=False)
     venue = models.JSONField(
-        _("venue"), null=False, blank=False, default=list, editable=True
+        _("venue"),
+        null=False,
+        blank=False,
+        default=list,
+        editable=True,
+        help_text=_(
+            "Participation modes this course is offered in: a list of "
+            "'online', 'onsite', or both. Empty means both."
+        ),
+    )
+    online_fee = models.CharField(
+        _("online fee"),
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text=_("Price for online participation. Overrides the programme online fee."),
+    )
+    onsite_fee = models.CharField(
+        _("onsite fee"),
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text=_("Price for onsite participation. Overrides the programme onsite fee."),
     )
     extra_info = models.TextField(_("extra_info"), blank=False, null=False)
     images = models.ManyToManyField(Image, related_name="related_images")
@@ -47,15 +78,45 @@ class Registration(BaseModelBaseMixin, models.Model):
         max_length=64,
         blank=True,
         null=True,
-        help_text=_("Optional label (e.g. Web3, Web2). Set on each programme in admin."),
+        help_text=_(
+            "Cohort label for this programme, for example Cohort XV. "
+            "Normalized on save. Participants copy it from their course."
+        ),
     )
     registrationFee = models.CharField(
-        _("registration fee"), max_length=50, blank=True, null=True
+        _("registration fee"),
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text=_(
+            "Legacy single fee. Used only when the online or onsite fee is blank."
+        ),
+    )
+    online_fee = models.CharField(
+        _("online fee"),
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text=_("Default online price for courses in this programme."),
+    )
+    onsite_fee = models.CharField(
+        _("onsite fee"),
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text=_("Default onsite price for courses in this programme."),
     )
 
     # New timestamp fields
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        label = normalize_cohort_label(self.cohort)
+        if label:
+            self.cohort = label[: self._meta.get_field("cohort").max_length]
+        super().save(*args, **kwargs)
+        deactivate_stale_registrations()
 
     def __str__(self):
         return (
@@ -79,8 +140,7 @@ class Participant(BaseModelBaseMixin, models.Model):
         on_delete=models.SET_NULL,
         null=True,
         help_text=_(
-            "Programme (Registration) for payments and reporting; copied from "
-            "Course.registration on save when missing."
+            "Copied from the course's programme. A client-supplied value is replaced on save."
         ),
     )
     status = models.CharField(
@@ -114,51 +174,91 @@ class Participant(BaseModelBaseMixin, models.Model):
         max_length=64,
         blank=True,
         null=True,
-        help_text=_("Set from the course’s programme on enroll; may be null for legacy rows."),
+        help_text=_(
+            "Copied from the course's programme. Not chosen independently."
+        ),
     )
     payment_status = models.BooleanField(default=False)
     is_evicted = models.BooleanField(default=False)
     evicted_at = models.DateTimeField(blank=True, null=True)
     eviction_reason = models.TextField(blank=True, null=True)
     venue = models.CharField(
-        _("venue"), max_length=30, blank=False, null=False, default="online"
+        _("venue"),
+        max_length=30,
+        choices=ParticipationMode.choices,
+        blank=False,
+        null=False,
+        default=ParticipationMode.ONLINE,
+        help_text=_("Required choice: online or onsite."),
     )
     # New timestamp fields
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def save(self, *args, **kwargs):
+    def _sync_programme_links(self, *, overwrite_cohort: bool) -> None:
         """
-        Always persist ``registration_id`` when the course has a programme link.
-        Prevents null programme FKs that break payment matching and reporting.
-        """
-        if self.registration_id is None and self.course_id:
-            try:
-                rid = (
-                    Course.objects.only("registration_id")
-                    .get(pk=self.course_id)
-                    .registration_id
-                )
-            except Course.DoesNotExist:
-                rid = None
-            if rid:
-                self.registration_id = rid
+        Registration and cohort come from the course's programme.
 
-        # Keep participant.cohort aligned with active cohort label when missing.
-        if (self.cohort or "").strip() == "" and self.registration_id:
-            try:
-                registration_obj = Registration.objects.only("cohort", "name").get(
-                    pk=self.registration_id
+        Cohort is filled when it is blank, or when the course itself changed.
+        A non-empty cohort is left alone on unrelated saves so a payment update
+        cannot collide with the email+cohort unique constraint.
+        """
+        registration = None
+        if self.course_id:
+            course = getattr(self, "course", None)
+            if course is None or getattr(course, "pk", None) != self.course_id:
+                course = (
+                    Course.objects.select_related("registration")
+                    .filter(pk=self.course_id)
+                    .first()
                 )
-            except Registration.DoesNotExist:
-                registration_obj = None
-            if registration_obj is not None:
-                label = resolve_active_cohort_label(
-                    registration=registration_obj,
-                    course=self.course,
-                )
-                if label:
-                    self.cohort = fit_participant_cohort(label)
+            if course is not None and course.registration_id:
+                self.registration_id = course.registration_id
+                registration = course.registration
+        if registration is None and self.registration_id:
+            registration = getattr(self, "registration", None)
+            if (
+                registration is None
+                or getattr(registration, "pk", None) != self.registration_id
+            ):
+                registration = Registration.objects.filter(pk=self.registration_id).first()
+        label = fit_participant_cohort(cohort_label_for_registration(registration))
+        if not label:
+            return
+        current = (self.cohort or "").strip()
+        if current == label:
+            return
+        if current and not overwrite_cohort:
+            return
+        email = (self.email or "").strip()
+        if email:
+            clash = (
+                type(self)
+                .objects.filter(email__iexact=email, cohort=label)
+                .exclude(pk=self.pk)
+                .exists()
+            )
+            if clash:
+                return
+        self.cohort = label
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            locked = set(update_fields)
+            if locked.isdisjoint(
+                {"course", "course_id", "registration", "registration_id", "cohort"}
+            ):
+                return super().save(*args, **kwargs)
+        overwrite_cohort = False
+        if self.pk:
+            previous_course_id = (
+                type(self).objects.filter(pk=self.pk).values_list("course_id", flat=True).first()
+            )
+            overwrite_cohort = previous_course_id != self.course_id
+        self._sync_programme_links(overwrite_cohort=overwrite_cohort)
+        if update_fields is not None:
+            kwargs["update_fields"] = list(set(update_fields) | {"registration", "cohort"})
         super().save(*args, **kwargs)
 
     class Meta:

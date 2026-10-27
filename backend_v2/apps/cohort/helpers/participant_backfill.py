@@ -3,13 +3,13 @@ from __future__ import annotations
 from django.db import IntegrityError
 
 from cohort import models
-from cohort.helpers.cohort_label import fit_participant_cohort, resolve_active_cohort_label
+from cohort.helpers.cohort_label import cohort_label_for_registration, fit_participant_cohort
 
 
 def normalize_participant_cohort_value(registration):
     if registration is None:
         return None
-    return fit_participant_cohort(resolve_active_cohort_label(registration=registration))
+    return fit_participant_cohort(cohort_label_for_registration(registration))
 
 
 def autocorrect_participant_links(*, participant_id=None, email=None, return_stats=False):

@@ -1,7 +1,11 @@
+from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.shortcuts import redirect
 from django.urls import path, reverse
 from django.utils.html import format_html
+
+from .helpers.pricing import normalize_participation_mode, offered_modes
 
 from .helpers.portal import execute_portal_invite_bulk, send_portal_invite_for_participant
 from .models import (
@@ -36,22 +40,69 @@ def send_portal_invite_bulk_action(modeladmin, request, queryset):
     )
 
 
+class ParticipantAdminForm(forms.ModelForm):
+    class Meta:
+        model = Participant
+        fields = "__all__"
+
+    def clean(self):
+        cleaned = super().clean()
+        course = cleaned.get("course")
+        venue = normalize_participation_mode(cleaned.get("venue"))
+        if cleaned.get("venue") and venue is None:
+            raise ValidationError({"venue": "Choose online or onsite."})
+        if venue:
+            cleaned["venue"] = venue
+        if course is not None and course.registration_id is None:
+            raise ValidationError(
+                "Link this course to a programme before enrolling a participant."
+            )
+        if course is not None and venue and venue not in offered_modes(course):
+            raise ValidationError(
+                {
+                    "venue": (
+                        "This course is offered "
+                        + " or ".join(offered_modes(course))
+                        + " only."
+                    )
+                }
+            )
+        return cleaned
+
+
 @admin.register(Participant)
 class ParticipantAdmin(admin.ModelAdmin):
+    form = ParticipantAdminForm
     list_display = (
         "id",
         "name",
         "email",
         "cohort",
+        "venue",
         "status",
         "payment_status",
         "is_evicted",
         "course",
+        "registration",
         "created_at",
     )
-    list_filter = ("payment_status", "status", "is_evicted", "course")
+    list_filter = (
+        "cohort",
+        "venue",
+        "payment_status",
+        "status",
+        "is_evicted",
+        "course",
+        "registration",
+    )
     search_fields = ("name", "email", "cohort")
-    readonly_fields = ("created_at", "updated_at", "portal_invite_actions")
+    readonly_fields = (
+        "cohort",
+        "registration",
+        "created_at",
+        "updated_at",
+        "portal_invite_actions",
+    )
     actions = [send_portal_invite_bulk_action]
     ordering = ["-created_at"]
 
@@ -147,8 +198,37 @@ class ParticipantAdmin(admin.ModelAdmin):
         return redirect("admin:cohort_participant_change", object_id)
 
 
-admin.site.register(Course)
-admin.site.register(Registration)
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "registration",
+        "status",
+        "online_fee",
+        "onsite_fee",
+        "duration",
+    )
+    list_filter = ("status", "registration", "registration__cohort")
+    search_fields = ("name", "registration__name", "registration__cohort")
+    autocomplete_fields = ("registration",)
+
+
+@admin.register(Registration)
+class RegistrationAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "cohort",
+        "is_open",
+        "online_fee",
+        "onsite_fee",
+        "registrationFee",
+        "start_date",
+        "end_date",
+    )
+    list_filter = ("is_open", "cohort")
+    search_fields = ("name", "cohort")
+
+
 admin.site.register(Testimonial)
 
 
