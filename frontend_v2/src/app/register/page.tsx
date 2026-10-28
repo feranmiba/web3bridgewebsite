@@ -2,7 +2,7 @@
 /* eslint-disable react/no-unescaped-entities */
 import React, { useEffect, useState } from "react";
 import MaxWrapper from "@/components/shared/MaxWrapper";
-import { MoveRight, Loader2 } from "lucide-react";
+import { MoveRight, Loader2, Clock, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import UnifiedRegistrationForm from "@/components/shared/UnifiedRegistrationForm";
 import { getCohortStatus, useFetchAllCourses } from "@/hooks";
@@ -10,6 +10,14 @@ import { buttonVariants } from "@/components/ui/button";
 import dynamic from "next/dynamic";
 import PaymentPendingModal from "@/components/shared/PaymentPendingModal";
 import SolidityAssessmentModal from "@/components/shared/SolidityAssessmentModal";
+import { cn } from "@/lib/utils";
+
+/**
+ * Hardcoded flag to control registration availability.
+ * Set to `true` to close registration and display the closed / opening soon message.
+ * Set to `false` to restore the active registration flow.
+ */
+const IS_REGISTRATION_CLOSED = true;
 // Types
 interface FormDataType {
   email: string;
@@ -326,6 +334,74 @@ export default function RegistrationPage() {
     checkStatus();
   }, [setIsClose, currentDate, openDate]);
 
+  if (IS_REGISTRATION_CLOSED) {
+    return (
+      <div className="min-h-[75vh] flex flex-col justify-center py-12 md:py-20 relative overflow-hidden">
+        {/* Ambient background glow */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-bridgeRed/5 rounded-full blur-[100px] pointer-events-none" />
+
+        <MaxWrapper className="flex-1 flex items-center justify-center">
+          <div className="w-full max-w-xl bg-card/60 dark:bg-secondary/40 backdrop-blur-md border border-border/80 rounded-2xl p-8 md:p-12 shadow-xl relative overflow-hidden text-center flex flex-col items-center gap-6">
+            {/* Top theme-accent bar */}
+            <div className="absolute top-0 left-0 right-0 h-[4px] bg-gradient-to-r from-bridgeRed via-red-500 to-bridgeRed" />
+
+            {/* Pulsing icon badge */}
+            <div className="w-16 h-16 rounded-full bg-bridgeRed/10 dark:bg-bridgeRed/20 flex items-center justify-center border border-bridgeRed/20 text-bridgeRed">
+              <Clock className="w-8 h-8 animate-pulse" />
+            </div>
+
+            {/* Status pill */}
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300 border border-red-200 dark:border-red-900/60">
+              <span className="w-2 h-2 rounded-full bg-bridgeRed" />
+              Registration Closed
+            </div>
+
+            {/* Typography */}
+            <div className="space-y-3">
+              <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-foreground">
+                Registration is Closed at the Moment
+              </h1>
+              <p className="text-sm md:text-base text-muted-foreground leading-relaxed max-w-md mx-auto">
+                Registration is currently closed and opening soon. Check back soon or join our waitlist and community to be notified when the next cohort opens!
+              </p>
+            </div>
+
+            {/* CTAs */}
+            <div className="w-full flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+              <a
+                href="https://forms.gle/5UJ6wSx1QnkZxGPXA"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  buttonVariants({ variant: "bridgePrimary" }),
+                  "w-full sm:w-auto px-6 py-2.5 flex items-center justify-center gap-2"
+                )}
+              >
+                Join Waitlist <MoveRight className="w-4 h-4" />
+              </a>
+
+              <a
+                href="https://t.me/web3bridge"
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  buttonVariants({ variant: "outline" }),
+                  "w-full sm:w-auto px-6 py-2.5 flex items-center justify-center gap-2"
+                )}
+              >
+                Join Telegram <ExternalLink className="w-4 h-4" />
+              </a>
+            </div>
+
+            <p className="text-xs text-muted-foreground pt-1">
+              Do join our Telegram group to get updates and information on the next cohort.
+            </p>
+          </div>
+        </MaxWrapper>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return (
       <MaxWrapper className="flex-1 flex items-center justify-center">
@@ -552,22 +628,5 @@ export default function RegistrationPage() {
         studentEmail={formData?.email}
       />
     </MaxWrapper>
-
-
-    //  <div style={{ minHeight: "100vh", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", padding: "2rem" }}>
-    //   <div style={{ textAlign: "center", maxWidth: 480 }}>
-    //     <div style={{ width: 64, height: 64, background: "#E24B4A", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 2rem" }}>
-    //       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    //         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-    //       </svg>
-    //     </div>
-    //     <h1 style={{ fontSize: 28, fontWeight: 500, color: "#E24B4A", margin: "0 0 0.75rem", letterSpacing: -0.5 }}>
-    //       Registration is not open yet
-    //     </h1>
-    //     <p style={{ fontSize: 16, color: "#888780", margin: 0, lineHeight: 1.6 }}>
-    //       Check back soon, we'll announce when spots become available.
-    //     </p>
-    //   </div>
-    // </div>
   );
 }
